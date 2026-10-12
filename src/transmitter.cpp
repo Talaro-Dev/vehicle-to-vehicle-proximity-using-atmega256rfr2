@@ -5,6 +5,7 @@
 #define BEACON_PAYLOAD_LENGTH 6         // Payload contains 4-byte V2V marker + 2-byte sequence number.
 #define FCS_LENGTH 2                    // 16-bit CRC/FCS appended automatically by the radio hardware.
 #define VEHICLE_FRAME_LENGTH (MAC_HEADER_LENGTH + BEACON_PAYLOAD_LENGTH + FCS_LENGTH) // Total transmit frame length in the radio buffer.
+#define BEACON_PERIOD_MS 20             // Send at 50 Hz so the receiver can filter with at most one 20 ms sample interval of window delay.
 
 #ifndef VEHICLE_ID                     // Allows overriding the vehicle ID from build flags.
 #define VEHICLE_ID 2                   // Default vehicle identifier for this board.
@@ -17,7 +18,7 @@
 static void uart_init(void)
 {
     UCSR1A = 0;                       // Clear USART1 status register to start from a known state.
-    UBRR1 = 25;                       // Set 8 MHz / 16 / 19200 baud ~ 25. For 8 MHz AVR, 25 gives ~19200 baud.
+    UBRR1 = 12;                       // Set approximately 38400 baud at 8 MHz for timely serial logging.
     UCSR1B = _BV(TXEN1);              // Enable only transmitter pin for UART1; receiver is not needed here.
     UCSR1C = _BV(UCSZ11) | _BV(UCSZ10); // 8-bit character size: UCSZ1=0b11 -> 8 data bits, no parity, 1 stop bit.
 }
@@ -65,8 +66,8 @@ static uint8_t wait_for_radio_state(uint8_t expected_state)
 
 static uint8_t radio_prepare_channel(void)
 {
-    TRX_STATE = 0x03;                 // Set radio to PLL_ON state: ready to receive/transmit and tune the transceiver.
-    if (!wait_for_radio_state(0x08)) { // Wait for state 0x08 = RX_ON or READY? On this chip the expected state is PLL_ON/READY.
+    TRX_STATE = 0x03;                 // Command FORCE_TRX_OFF before changing radio configuration.
+    if (!wait_for_radio_state(0x08)) { // Wait for the TRX_STATUS state code TRX_OFF.
         return 0;                    // Radio failed to enter the expected state.
     }
 
@@ -81,8 +82,8 @@ static uint8_t send_vehicle_beacon(uint16_t sequence_number)
     }
 
     TRX_CTRL_1 |= _BV(TX_AUTO_CRC_ON); // Turn on automatic CRC generation for transmitted frames.
-    TRX_STATE = 0x09;                 // Set TRX_STATE to TX_START: start the transmit sequence.
-    if (!wait_for_radio_state(0x09)) { // Wait until the radio indicates TX state is active and ready.
+    TRX_STATE = 0x09;                 // Command PLL_ON so the synthesizer is ready before loading/transmitting the frame.
+    if (!wait_for_radio_state(0x09)) { // Wait until TRX_STATUS reports PLL_ON.
         return 0;                    // Abort if the radio never reaches the expected TX state.
     }
 
@@ -104,10 +105,11 @@ static uint8_t send_vehicle_beacon(uint16_t sequence_number)
     frame_buffer[14] = (uint8_t)(sequence_number & 0xFF); // Byte 14: low byte of the beacon sequence counter.
     frame_buffer[15] = (uint8_t)(sequence_number >> 8); // Byte 15: high byte of the beacon sequence counter.
 
-    (void)IRQ_STATUS;                 // Read IRQ_STATUS once to clear any stale interrupt flag before starting the TX.
-    TRX_STATE = 0x02;                 // Set radio to RX_ON or send to TX? On this firmware it transitions back to RX_ON after the write; TX_END will occur afterward.
+    IRQ_STATUS = _BV(TX_END);         // Clear any stale TX_END flag before starting this transmission.
+    TRX_STATE = 0x02;                 // Command TX_START to transmit the frame currently in the radio frame buffer.
     for (uint32_t timeout = 0; timeout < 100000UL; ++timeout) { // Wait for hardware completion of the TX cycle.
         if (IRQ_STATUS & _BV(TX_END)) { // Check whether the radio has asserted the TX end interrupt.
+            IRQ_STATUS = _BV(TX_END); // Clear TX_END so the next beacon waits for its own completion event.
             return 1;                // Transmission was successful.
         }
     }
@@ -125,6 +127,6 @@ int main(void)
         uart_print_uint(sequence_number); // Print the current sequence number to the serial monitor.
         uart_putc(',');              // Separate the sequence and status with a comma for simple CSV output.
         uart_write(send_vehicle_beacon(sequence_number) ? "sent\r\n" : "tx_error\r\n"); // Transmit the frame and immediately print the result status.
-        _delay_ms(500);               // Pause 500 ms to create a periodic beacon rate of about 2 packets per second.
+        _delay_ms(BEACON_PERIOD_MS);  // Pause 20 ms between beacons, for a nominal 50 Hz update rate.
     }
 }
