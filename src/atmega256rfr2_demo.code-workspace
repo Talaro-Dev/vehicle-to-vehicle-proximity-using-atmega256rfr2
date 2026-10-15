@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"name": "test_atmega",
+			"path": "../../../../../MPLABProjects/test_atmega"
+		}
+	],
+	"settings": {}
+}
